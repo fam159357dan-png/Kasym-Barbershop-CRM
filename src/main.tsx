@@ -1,22 +1,10 @@
-import { StrictMode, Suspense, lazy } from 'react';
+import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
 
-// CRM для администраторов: по адресу /crm (старый /admin тоже работает) или на отдельном домене kasim-barbershop-crm.*
-// Грузится отдельным файлом, сайт её не тянет.
-const Admin = lazy(() => import('./admin/Admin.tsx'));
-const isAdmin =
-  ['/crm', '/admin'].includes(location.pathname.replace(/\/$/, '')) || location.hostname.startsWith('kasim-barbershop-crm.');
-
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    {isAdmin ? (
-      <Suspense fallback={null}>
-        <Admin />
-      </Suspense>
-    ) : (
-      <App />
-    )}
+    <App />
   </StrictMode>
 );

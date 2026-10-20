@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { X, Check, ChevronLeft, ChevronRight, Calendar, Clock, User, MessageCircle, Scissors } from 'lucide-react';
 import { LOCATIONS, MASTER_PHOTOS, TIME_SLOTS } from '@/data';
-import { busySlots, saveBooking, CRM_LINK } from '@/lib/db';
 import { BOOKING_SERVICES, type BookingService, fitsAt } from '@/lib/services';
 
 interface BookingModalProps {
@@ -15,9 +14,6 @@ const MONTHS_OF = ['января', 'февраля', 'марта', 'апреля
 const WEEKDAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 
 // Не toISOString(): он считает в UTC и в нашем поясе сдвигает дату на день назад
-const isoDate = (d: Date) =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-
 // Шаги: 0 филиал, 1 услуга, 2 мастер, 3 дата, 4 время, 5 контакты
 const LAST = 5;
 
@@ -32,11 +28,6 @@ export default function BookingModal({ open, onClose }: BookingModalProps) {
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [success, setSuccess] = useState(false);
-  // заявка дошла до CRM; false — база недоступна, остаётся только WhatsApp
-  const [saved, setSaved] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [busy, setBusy] = useState<Record<string, string[]>>({});
-  const [timeError, setTimeError] = useState('');
 
   const reset = useCallback(() => {
     setStep(0);
@@ -49,10 +40,6 @@ export default function BookingModal({ open, onClose }: BookingModalProps) {
     setName('');
     setPhone('');
     setSuccess(false);
-    setSaved(false);
-    setSaving(false);
-    setBusy({});
-    setTimeError('');
   }, []);
 
   useEffect(() => {
@@ -68,27 +55,15 @@ export default function BookingModal({ open, onClose }: BookingModalProps) {
     return () => { document.body.style.overflow = ''; };
   }, [open]);
 
-  // Занятое время подгружаем, когда клиент дошёл до выбора времени
-  const dateKey = selectedDate ? isoDate(selectedDate) : '';
-  useEffect(() => {
-    if (!CRM_LINK || !open || step !== 4 || !location || !dateKey) return;
-    let alive = true;
-    busySlots(location, dateKey).then((b) => alive && setBusy(b));
-    return () => { alive = false; };
-  }, [open, step, location, dateKey]);
-
   if (!open) return null;
 
   // Мастера выбранного филиала: список зависит от филиала
   const masters = LOCATIONS.find((l) => l.name === location)?.masters ?? [];
 
-  // Слот годится, если услуга помещается в него целиком: все её получасовые слоты свободны
-  // и она заканчивается до закрытия. Для «Любого» хватает одного свободного мастера.
-  const freeFor = (m: string, slot: string) =>
-    service !== null && fitsAt(slot, service.minutes, (s) => !busy[m]?.includes(s));
+  // Слот годится, если услуга помещается в него целиком до закрытия и время ещё не прошло.
+  // Занятость мастеров не проверяем: записи идут через WhatsApp, база не подключена.
   const slotTaken = (slot: string) => {
-    const ok = barber === 'Любой' ? masters.some((m) => freeFor(m, slot)) : freeFor(barber, slot);
-    if (!ok) return true;
+    if (service === null || !fitsAt(slot, service.minutes, () => true)) return true;
     if (selectedDate && isToday(selectedDate)) {
       const now = new Date();
       const [h, m] = slot.split(':').map(Number);
@@ -97,38 +72,12 @@ export default function BookingModal({ open, onClose }: BookingModalProps) {
     return false;
   };
 
-  // Заявка пишется в CRM (Supabase) и дублируется клиентом в WhatsApp филиала.
-  // База недоступна — не теряем клиента: показываем тот же WhatsApp.
-  const handleSubmit = async () => {
+  // Заявка уходит в WhatsApp филиала с готовым текстом. Окно открываем сразу в клике,
+  // иначе браузер может его заблокировать. Экран подтверждения — запасной вариант.
+  const handleSubmit = () => {
     if (!barber || !location || !selectedDate || !time || !name || !phone || !service) return;
-    // Без связи с CRM: сразу открываем WhatsApp филиала с готовым текстом, до любых ожиданий —
-    // иначе браузер может заблокировать окно. Экран подтверждения остаётся запасным вариантом.
-    if (!CRM_LINK) {
-      const link = waLink();
-      if (link) window.open(link, '_blank', 'noopener');
-      setSaved(false);
-      setSuccess(true);
-      return;
-    }
-    setSaving(true);
-    const res = await saveBooking({
-      location,
-      barber,
-      date: isoDate(selectedDate),
-      time,
-      name: name.trim(),
-      phone: phone.trim(),
-      service: service.name,
-      duration: service.minutes,
-    });
-    setSaving(false);
-    if (res === 'taken') {
-      setTime('');
-      setTimeError('Это время только что заняли — выберите другое.');
-      setStep(4);
-      return;
-    }
-    setSaved(res === 'ok');
+    const link = waLink();
+    if (link) window.open(link, '_blank', 'noopener');
     setSuccess(true);
   };
 
@@ -231,14 +180,10 @@ export default function BookingModal({ open, onClose }: BookingModalProps) {
               <MessageCircle size={32} className="text-[var(--gold)]" />
             </div>
             <h3 className="font-display text-2xl font-medium uppercase">
-              {!CRM_LINK ? 'Откройте WhatsApp' : saved ? 'Заявка принята' : 'Остался один шаг'}
+              Откройте WhatsApp
             </h3>
             <p className="max-w-sm text-[15px] leading-relaxed text-[var(--muted)]">
-              {!CRM_LINK
-                ? 'WhatsApp филиала открылся с готовым сообщением — нажмите там «Отправить», и администратор подтвердит запись. Если он не открылся, нажмите кнопку ниже.'
-                : saved
-                  ? 'Время за вами. Администратор свяжется для подтверждения — а быстрее всего написать в WhatsApp филиала, текст уже готов.'
-                  : 'Нажмите кнопку — откроется WhatsApp филиала с готовым текстом. Отправьте его, и администратор подтвердит запись.'}
+              WhatsApp филиала открылся с готовым сообщением — нажмите там «Отправить», и администратор подтвердит запись. Если он не открылся, нажмите кнопку ниже.
             </p>
             <div className="mt-2 rounded-xl border border-[var(--border)] bg-black/30 px-5 py-4 text-left text-sm">
               <div className="flex gap-2"><span className="text-[var(--muted)]">Филиал:</span><span className="text-white">{location}</span></div>
@@ -441,7 +386,6 @@ export default function BookingModal({ open, onClose }: BookingModalProps) {
                   <p className="mb-3 text-[13px] text-[var(--muted)]">
                     {service?.name}, {service?.minutes} минут. Показаны только те часы, где услуга помещается целиком.
                   </p>
-                  {timeError && <p className="mb-3 text-[14px] text-amber-300">{timeError}</p>}
                   <div className="grid grid-cols-4 gap-2">
                     {TIME_SLOTS.map((slot) => {
                       const taken = slotTaken(slot);
@@ -449,10 +393,7 @@ export default function BookingModal({ open, onClose }: BookingModalProps) {
                         <button
                           key={slot}
                           disabled={taken}
-                          onClick={() => {
-                            setTime(slot);
-                            setTimeError('');
-                          }}
+                          onClick={() => setTime(slot)}
                           className={`rounded-lg border py-2.5 text-sm transition-all ${
                             taken
                               ? 'cursor-not-allowed border-transparent text-white/15 line-through'
@@ -537,10 +478,10 @@ export default function BookingModal({ open, onClose }: BookingModalProps) {
               ) : (
                 <button
                   onClick={handleSubmit}
-                  disabled={!canProceed() || saving}
-                  className={`btn ${canProceed() && !saving ? 'btn-gold' : 'btn-ghost opacity-40'}`}
+                  disabled={!canProceed()}
+                  className={`btn ${canProceed() ? 'btn-gold' : 'btn-ghost opacity-40'}`}
                 >
-                  {saving ? 'Отправляем…' : 'Записаться'}
+                  Записаться
                 </button>
               )}
             </div>
