@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { createClient, type Session } from '@supabase/supabase-js';
-import { Phone, MessageCircle, LogOut, Search, RefreshCw, Plus, X, Download } from 'lucide-react';
+import { Phone, MessageCircle, LogOut, Search, RefreshCw, Plus, X, Download, Pencil, Ban, Trash2 } from 'lucide-react';
 import { LOCATIONS, MASTER_PHOTOS, TIME_SLOTS } from '@/data';
+import { BOOKING_SERVICES, coveredSlots, fitsAt, fromMin, toMin } from '@/lib/services';
 import { SUPABASE_URL, SUPABASE_KEY } from '@/lib/db';
 
-// CRM открывается по адресу /admin. Библиотека Supabase грузится только здесь,
+// CRM открывается по адресу /crm. Библиотека Supabase грузится только здесь,
 // основной сайт её не тянет (см. main.tsx).
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -21,6 +22,27 @@ interface Booking {
   status: Status;
   note: string;
   source: 'site' | 'admin';
+  service: string;
+  price: number | null;
+  duration: number; // минуты
+  payment: Payment | null;
+}
+
+type Payment = 'cash' | 'kaspi' | 'halyk' | 'card';
+const PAYMENTS: { id: Payment; label: string }[] = [
+  { id: 'cash', label: 'Наличка' },
+  { id: 'kaspi', label: 'Каспи QR' },
+  { id: 'halyk', label: 'Халык' },
+  { id: 'card', label: 'Карта' },
+];
+
+interface Block {
+  id: string;
+  location: string;
+  barber: string;
+  date: string;
+  time: string | null; // null — весь день
+  reason: string;
 }
 
 const STATUS: Record<Status, { label: string; cls: string }> = {
@@ -83,11 +105,11 @@ const waNumber = (phone: string) => {
 };
 
 // Перезагрузить данные при любом изменении заявок (новая с сайта, правка другого администратора).
-function useLiveReload(name: string, reload: () => void) {
+function useLiveReload(name: string, reload: () => void, table = 'bookings') {
   useEffect(() => {
     const ch = supabase
       .channel(name)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, () => reload())
+      .on('postgres_changes', { event: '*', schema: 'public', table }, () => reload())
       .subscribe();
     return () => {
       supabase.removeChannel(ch);
@@ -124,6 +146,19 @@ function beep() {
   }
 }
 
+interface Me {
+  role: 'owner' | 'staff';
+  branch: string | null;
+}
+
+// Почта входа каждого филиала. Входы создаёт владелец проекта в Supabase (Authentication → Users).
+const LOGIN_EMAIL: Record<string, string> = {
+  ДСР: 'dsr@qasym.kz',
+  Тайга: 'taiga@qasym.kz',
+  Шажимбаева: 'shazhimbaeva@qasym.kz',
+  Владелец: 'kasym@qasym.kz',
+};
+
 // Что подставить в форму «Добавить запись» (из расписания — мастер, дата и время).
 interface AddInit {
   branch?: string;
@@ -138,7 +173,7 @@ export default function Admin() {
   const [tab, setTab] = useState<'schedule' | 'list' | 'stats' | 'passwords' | 'help'>('schedule');
   const [newCount, setNewCount] = useState(0);
   const [addInit, setAddInit] = useState<AddInit | null>(null);
-  const [owner, setOwner] = useState(false); // личный вход Касыма — ему видна вкладка «Пароли»
+  const [me, setMe] = useState<Me | null | undefined>(undefined); // undefined — ещё грузится, null — входа нет в списке сотрудников
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -150,9 +185,13 @@ export default function Admin() {
   }, []);
 
   useEffect(() => {
-    if (!session) return setOwner(false);
-    supabase.rpc('crm_role').then(({ data }) => setOwner(data === 'owner'));
+    if (!session) return setMe(undefined);
+    supabase.rpc('crm_me').then(({ data }) => setMe(((data ?? []) as Me[])[0] ?? null));
   }, [session]);
+
+  // Касым (owner) — все филиалы и вкладка «Пароли»; администратор филиала видит только свой. '*' — прежний общий вход.
+  const owner = me?.role === 'owner';
+  const lock = me && !owner && me.branch !== '*' ? me.branch : null;
 
   // Число новых заявок и звук — на любой вкладке.
   useEffect(() => {
@@ -182,6 +221,16 @@ export default function Admin() {
 
   if (!ready) return null;
   if (!session) return <Login />;
+  if (me === undefined) return null;
+  if (me === null)
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-4 px-4 text-center">
+        <p className="max-w-sm text-[16px]">У этого входа нет доступа к CRM. Обратитесь к Касыму.</p>
+        <button onClick={() => supabase.auth.signOut()} className="btn btn-ghost">
+          Выйти
+        </button>
+      </div>
+    );
 
   return (
     <div className="min-h-screen pb-16">
@@ -190,6 +239,7 @@ export default function Admin() {
         <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-x-6 gap-y-1.5 px-4 py-2 sm:py-3">
           <div className="font-display text-[16px] tracking-[0.2em] uppercase sm:text-[18px]">
             Qasym <span className="gold-text">CRM</span>
+            {lock && <span className="ml-2 text-[13px] tracking-[0.1em] text-[var(--muted)]">· {lock}</span>}
           </div>
           <nav className="no-sb order-last -mx-1.5 flex w-full gap-0.5 overflow-x-auto text-[13px] min-[400px]:text-[14px] sm:order-none sm:mx-0 sm:w-auto sm:gap-1">
             {(
@@ -223,31 +273,40 @@ export default function Admin() {
       </header>
 
       <main className="mx-auto max-w-5xl px-4 pt-4 sm:pt-6">
-        {tab === 'schedule' && <Schedule onAdd={setAddInit} />}
-        {tab === 'list' && <Bookings newCount={newCount} onAdd={setAddInit} />}
+        {tab === 'schedule' && <Schedule lock={lock} onAdd={setAddInit} />}
+        {tab === 'list' && <Bookings lock={lock} newCount={newCount} onAdd={setAddInit} />}
         {tab === 'stats' && <Stats />}
         {tab === 'passwords' && owner && <Passwords />}
         {tab === 'help' && <Help />}
       </main>
 
-      {addInit && <AddBooking init={addInit} onClose={() => setAddInit(null)} onSaved={() => setAddInit(null)} />}
+      {addInit && (
+        <AddBooking
+          init={lock ? { ...addInit, branch: lock } : addInit}
+          lock={lock}
+          onClose={() => setAddInit(null)}
+          onSaved={() => setAddInit(null)}
+        />
+      )}
     </div>
   );
 }
 
 function Login() {
-  const [email, setEmail] = useState('');
+  const [who, setWho] = useState(''); // филиал или «Владелец»
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const login = LOGIN_EMAIL[who];
+    if (!login) return setError('Выберите филиал');
     setBusy(true);
     setError('');
-    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    const { error } = await supabase.auth.signInWithPassword({ email: login, password });
     setBusy(false);
-    if (error) setError('Неверный email или пароль');
+    if (error) setError('Неверный пароль');
   };
 
   return (
@@ -257,17 +316,14 @@ function Login() {
           Qasym <span className="gold-text">CRM</span>
         </div>
         <p className="mt-1 text-[14px] text-[var(--muted)]">Вход для администраторов</p>
-        <label className="mt-6 block text-[12px] tracking-[0.12em] uppercase text-[var(--muted)]" htmlFor="crm-email">
-          Email
-        </label>
-        <input
-          id="crm-email"
-          type="email"
-          autoComplete="username"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          className="mt-1.5 w-full rounded-xl border border-[var(--border)] bg-black/30 px-4 py-3 text-[16px] focus:border-[var(--gold)] focus:outline-none"
-        />
+        <span className="mt-6 block text-[12px] tracking-[0.12em] uppercase text-[var(--muted)]">Ваш филиал</span>
+        <div className="mt-1.5 flex flex-wrap gap-2">
+          {[...LOCATIONS.map((l) => l.name), 'Владелец'].map((n) => (
+            <button type="button" key={n} onClick={() => setWho(n)} className={chip(who === n)}>
+              {n}
+            </button>
+          ))}
+        </div>
         <label className="mt-4 block text-[12px] tracking-[0.12em] uppercase text-[var(--muted)]" htmlFor="crm-pass">
           Пароль
         </label>
@@ -286,7 +342,7 @@ function Login() {
         <details className="mt-4 text-[14px] text-[var(--muted)]">
           <summary className="cursor-pointer text-center hover:text-white">Забыли пароль?</summary>
           <p className="mt-3 leading-relaxed">
-            Пароль сотрудников восстанавливает только Касым. Позвоните ему — он войдёт в CRM под своим логином и задаст новый пароль на
+            Пароль администратора филиала задаёт только Касым. Позвоните ему — он войдёт в CRM как «Владелец» и поставит новый пароль на
             вкладке «Пароли».
           </p>
         </details>
@@ -295,9 +351,9 @@ function Login() {
   );
 }
 
-function Bookings({ newCount, onAdd }: { newCount: number; onAdd: (init: AddInit) => void }) {
+function Bookings({ lock, newCount, onAdd }: { lock: string | null; newCount: number; onAdd: (init: AddInit) => void }) {
   const [view, setView] = useState<View>('today');
-  const [branch, setBranch] = useState('all');
+  const [branch, setBranch] = useState(lock ?? 'all');
   const [search, setSearch] = useState('');
   const [rows, setRows] = useState<Booking[]>([]);
   const [loading, setLoading] = useState(true);
@@ -308,7 +364,9 @@ function Bookings({ newCount, onAdd }: { newCount: number; onAdd: (init: AddInit
     const s = search.replace(/[,()%*]/g, '').trim();
     let q = supabase.from('bookings').select('*');
     if (s) {
-      q = q.or(`name.ilike.%${s}%,phone.ilike.%${s}%`);
+      // по номеру ищем цифры: «775 27», «87752…» и «+7 775…» дают одного клиента
+      const key = phoneKeyOf(s);
+      q = key ? q.or(`name.ilike.%${s}%,phone_digits.like.%${key}%`) : q.or(`name.ilike.%${s}%`);
     } else if (view === 'today') q = q.eq('date', dayOffset(0));
     else if (view === 'tomorrow') q = q.eq('date', dayOffset(1));
     else if (view === 'week') q = q.gte('date', dayOffset(0)).lte('date', dayOffset(6));
@@ -386,7 +444,7 @@ function Bookings({ newCount, onAdd }: { newCount: number; onAdd: (init: AddInit
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Поиск по имени или телефону"
+            placeholder="Имя или часть номера телефона"
             className="w-full bg-transparent text-[16px] focus:outline-none sm:text-[14px]"
           />
         </label>
@@ -398,6 +456,7 @@ function Bookings({ newCount, onAdd }: { newCount: number; onAdd: (init: AddInit
           }}
           className="min-w-0 flex-1 rounded-xl border border-[var(--border)] bg-black/40 px-3 py-2 text-[16px] sm:flex-none sm:text-[14px]"
           aria-label="Филиал"
+          hidden={!!lock}
         >
           <option value="all">Все филиалы</option>
           {LOCATIONS.map((l) => (
@@ -413,6 +472,8 @@ function Bookings({ newCount, onAdd }: { newCount: number; onAdd: (init: AddInit
           <Plus size={16} /> Записать
         </button>
       </div>
+
+      {phoneKeyOf(search) && <ClientHistory rows={rows} phoneKey={phoneKeyOf(search)} />}
 
       <div className="no-sb -mx-4 mt-3 flex gap-2 overflow-x-auto px-4" role="tablist" aria-label="Мастера">
         {['', ...masterTabs].map((m) => {
@@ -457,9 +518,92 @@ function Bookings({ newCount, onAdd }: { newCount: number; onAdd: (init: AddInit
   );
 }
 
+const money = (n: number) => `${n.toLocaleString('ru-RU')} ₸`;
+
+// Ключ для поиска по телефону: последние 10 цифр (без 8/+7). Меньше 4 цифр — не номер, ищем по имени.
+const phoneKeyOf = (s: string) => {
+  const d = s.replace(/\D/g, '');
+  if (d.length < 4) return '';
+  return d.length >= 10 ? d.slice(-10) : d;
+};
+
+// История клиента: всё, что есть по найденному номеру — сколько раз приходил, суммы, последний визит.
+// Заметки видны в самих записях ниже и редактируются там же.
+function ClientHistory({ rows, phoneKey }: { rows: Booking[]; phoneKey: string }) {
+  const mine = rows.filter((r) => r.phone.replace(/\D/g, '').slice(-10).includes(phoneKey));
+  if (mine.length === 0) {
+    return phoneKey.length >= 10 ? (
+      <div className="mt-4 rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 text-[14px] text-[var(--muted)]">
+        С этим номером записей нет. Новый клиент.
+      </div>
+    ) : null;
+  }
+  const visits = mine.filter((r) => r.status === 'done');
+  const noShow = mine.filter((r) => r.status === 'no_show').length;
+  const cancelled = mine.filter((r) => r.status === 'cancelled').length;
+  const spent = visits.reduce((a, r) => a + (r.price ?? 0), 0);
+  const last = visits.map((r) => r.date).sort().at(-1);
+  const names = [...new Set(mine.map((r) => r.name))].join(', ');
+  const phones = [...new Set(mine.map((r) => r.phone))].join(', ');
+  const cell = (label: string, value: string, cls = '') => (
+    <div className="rounded-xl border border-[var(--border)] bg-black/20 px-3 py-2">
+      <div className="text-[12px] text-[var(--muted)]">{label}</div>
+      <div className={`font-display text-[20px] ${cls}`}>{value}</div>
+    </div>
+  );
+  return (
+    <div className="mt-4 rounded-2xl border border-[var(--gold)]/30 bg-[var(--card)] p-4 sm:p-5">
+      <div className="text-[12px] tracking-[0.14em] uppercase text-[var(--gold)]">История клиента</div>
+      <div className="mt-1 text-[16px] font-medium">{names}</div>
+      <div className="text-[14px] text-[var(--muted)]">{phones}</div>
+      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-5">
+        {cell('Приходил', String(visits.length), 'text-emerald-300')}
+        {cell('Не пришёл', String(noShow), noShow ? 'text-rose-300' : '')}
+        {cell('Отменил', String(cancelled), 'text-white/60')}
+        {cell('Сумма', money(spent), 'text-[var(--gold-soft)]')}
+        {cell('Последний визит', last ? ru(last) : 'нет', '')}
+      </div>
+    </div>
+  );
+}
+// 14:00 + 120 мин → 16:00
+const addMin = (t: string, minutes: number) => {
+  const n = Number(t.split(':')[0]) * 60 + Number(t.split(':')[1]) + minutes;
+  return `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
+};
+
 function Card({ b, onUpdate }: { b: Booking; onUpdate: (b: Booking, p: Partial<Booking>) => void }) {
   const [note, setNote] = useState(b.note);
   useEffect(() => setNote(b.note), [b.note]);
+  const [editing, setEditing] = useState(false);
+  // окно «Пришёл»: барбер вписывает стоимость и нажимает «Завершено»
+  const [finishing, setFinishing] = useState(false);
+  const [fin, setFin] = useState<{ service: string; price: string; payment: Payment | '' }>({ service: '', price: '', payment: '' });
+  // стоимость подставляем из прайса услуги, барбер может поправить
+  const openFinish = () => {
+    setFin({ service: '', price: String(BOOKING_SERVICES.find((s) => s.name === b.service)?.price ?? ''), payment: '' });
+    setFinishing(true);
+  };
+  const finish = () => {
+    const price = Math.round(Number(fin.price));
+    if (!fin.price.trim() || !price || price <= 0) return alert('Впишите стоимость услуги');
+    if (!fin.payment) return alert('Выберите способ оплаты');
+    onUpdate(b, { status: 'done', service: fin.service.trim() || b.service, price, payment: fin.payment });
+    setFinishing(false);
+  };
+  const [form, setForm] = useState({ name: b.name, phone: b.phone, service: b.service, price: b.price?.toString() ?? '', payment: (b.payment ?? '') as Payment | '' });
+  const startEdit = () => {
+    setForm({ name: b.name, phone: b.phone, service: b.service, price: b.price?.toString() ?? '' });
+    setEditing(true);
+  };
+  const saveEdit = () => {
+    const price = form.price.trim() === '' ? null : Math.max(0, Math.round(Number(form.price)));
+    if (price !== null && Number.isNaN(price)) return alert('Стоимость — число, например 5000');
+    if (!form.name.trim()) return alert('Укажите имя клиента');
+    onUpdate(b, { name: form.name.trim(), phone: form.phone.trim(), service: form.service.trim(), price, payment: form.payment || null });
+    setEditing(false);
+  };
+  const input = 'mt-1 w-full rounded-lg border border-[var(--border)] bg-black/40 px-3 py-2 text-[16px] focus:border-[var(--gold)] focus:outline-none sm:text-[14px]';
 
   return (
     <article
@@ -468,15 +612,66 @@ function Card({ b, onUpdate }: { b: Booking; onUpdate: (b: Booking, p: Partial<B
       }`}
     >
       <div className="flex items-start gap-3 sm:gap-5">
-        <div className="font-display text-[22px] leading-none sm:text-[28px]">{b.time}</div>
+        <div className="shrink-0">
+          <div className="font-display text-[22px] leading-none sm:text-[28px]">{b.time}</div>
+          {b.duration > 30 && <div className="mt-1 text-[12px] text-[var(--muted)]">до {addMin(b.time, b.duration)}</div>}
+        </div>
         <div className="min-w-0 flex-1">
           <div className="truncate text-[16px] font-medium sm:text-[17px]">{b.name}</div>
+          {/* телефон и стоимость всегда на виду */}
+          <div className="mt-0.5 text-[14px] text-white/90">
+            {b.phone ? (
+              <a href={`tel:${b.phone.replace(/[^\d+]/g, '')}`} className="font-medium text-[var(--gold-soft)]">
+                {b.phone}
+              </a>
+            ) : (
+              <span className="text-[var(--muted)]">Телефон не указан</span>
+            )}
+          </div>
           <div className="mt-0.5 text-[13px] text-[var(--muted)] sm:text-[14px]">
             {b.location} · мастер: <span className="text-white/90">{b.barber}</span>
+            {b.service && <> · {b.service}</>}
+            {b.price !== null && <> · <span className="text-white/90">{money(b.price)}</span></>}
           </div>
         </div>
         <span className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[12px] sm:px-3 sm:py-1 sm:text-[13px] ${STATUS[b.status].cls}`}>{STATUS[b.status].label}</span>
       </div>
+
+      {editing && (
+        <div className="mt-3 grid grid-cols-2 gap-2 rounded-xl border border-[var(--border)] bg-black/20 p-3 sm:gap-3">
+          <label className="col-span-2 text-[12px] text-[var(--muted)]">
+            Имя клиента
+            <input value={form.name} maxLength={60} onChange={(e) => setForm({ ...form, name: e.target.value })} className={input} />
+          </label>
+          <label className="text-[12px] text-[var(--muted)]">
+            Телефон
+            <input type="tel" value={form.phone} maxLength={25} onChange={(e) => setForm({ ...form, phone: e.target.value })} className={input} />
+          </label>
+          <label className="text-[12px] text-[var(--muted)]">
+            Стоимость, ₸
+            <input inputMode="numeric" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value.replace(/\D/g, '') })} placeholder="5000" className={input} />
+          </label>
+          <label className="col-span-2 text-[12px] text-[var(--muted)]">
+            Услуга
+            <input value={form.service} maxLength={80} onChange={(e) => setForm({ ...form, service: e.target.value })} placeholder="стрижка, борода…" className={input} />
+          </label>
+          <label className="col-span-2 text-[12px] text-[var(--muted)]">
+            Оплата
+            <select value={form.payment} onChange={(e) => setForm({ ...form, payment: e.target.value as Payment | '' })} className={input}>
+              <option value="">не указана</option>
+              {PAYMENTS.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="col-span-2 flex gap-2">
+            <button onClick={saveEdit} className="btn btn-gold !h-10 !px-5">Сохранить</button>
+            <button onClick={() => setEditing(false)} className="btn btn-ghost !h-10 !px-5">Отмена</button>
+          </div>
+        </div>
+      )}
 
       <div className="mt-2.5 flex flex-wrap items-center gap-2 sm:mt-3">
         {b.phone ? (
@@ -501,7 +696,7 @@ function Card({ b, onUpdate }: { b: Booking; onUpdate: (b: Booking, p: Partial<B
           {NEXT[b.status].map((s) => (
             <button
               key={s}
-              onClick={() => onUpdate(b, { status: s })}
+              onClick={() => (s === 'done' ? openFinish() : onUpdate(b, { status: s }))}
               className={`rounded-lg border px-3 py-2 text-[14px] sm:py-1.5 ${STATUS[s].cls} hover:brightness-125 ${
                 s === 'done' || s === 'no_show' ? 'flex-1 font-medium sm:flex-none' : ''
               }`}
@@ -512,6 +707,62 @@ function Card({ b, onUpdate }: { b: Booking; onUpdate: (b: Booking, p: Partial<B
         </div>
       </div>
 
+      {finishing && (
+        <div className="mt-3 grid grid-cols-2 gap-2 rounded-xl border border-emerald-400/40 bg-emerald-400/5 p-3 sm:gap-3">
+          <div className="col-span-2 text-[14px] text-emerald-200">Клиент пришёл. Впишите, сколько стоила услуга:</div>
+          <label className="text-[12px] text-[var(--muted)]">
+            Стоимость, ₸
+            <input
+              inputMode="numeric"
+              autoFocus
+              value={fin.price}
+              onChange={(e) => setFin({ ...fin, price: e.target.value.replace(/\D/g, '') })}
+              placeholder="5000"
+              className="mt-1 w-full rounded-lg border border-[var(--border)] bg-black/40 px-3 py-2 text-[16px] focus:border-[var(--gold)] focus:outline-none sm:text-[14px]"
+            />
+          </label>
+          <label className="text-[12px] text-[var(--muted)]">
+            Услуга
+            <input
+              value={fin.service}
+              maxLength={80}
+              onChange={(e) => setFin({ ...fin, service: e.target.value })}
+              placeholder={b.service || 'стрижка, борода…'}
+              className="mt-1 w-full rounded-lg border border-[var(--border)] bg-black/40 px-3 py-2 text-[16px] focus:border-[var(--gold)] focus:outline-none sm:text-[14px]"
+            />
+          </label>
+          <div className="col-span-2">
+            <div className="mb-1.5 text-[12px] text-[var(--muted)]">Оплата</div>
+            <div className="flex flex-wrap gap-2">
+              {PAYMENTS.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => setFin({ ...fin, payment: p.id })}
+                  aria-pressed={fin.payment === p.id}
+                  className={`rounded-lg border px-3 py-2 text-[14px] ${
+                    fin.payment === p.id ? 'border-emerald-300 bg-emerald-400/20 text-white' : 'border-[var(--border)] text-[var(--muted)] hover:text-white'
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="col-span-2 flex gap-2">
+            <button onClick={finish} className="btn btn-gold !h-10 !px-5">
+              Завершено
+            </button>
+            <button onClick={() => setFinishing(false)} className="btn btn-ghost !h-10 !px-5">
+              Отмена
+            </button>
+          </div>
+        </div>
+      )}
+      {b.status === 'done' && b.price === null && !finishing && (
+        <div className="mt-3 text-[13px] text-amber-300">Стоимость не указана — она не попадёт в статистику. Нажмите «Изменить» и впишите её.</div>
+      )}
+
       <input
         value={note}
         onChange={(e) => setNote(e.target.value)}
@@ -519,9 +770,16 @@ function Card({ b, onUpdate }: { b: Booking; onUpdate: (b: Booking, p: Partial<B
         placeholder="Заметка: пожелания, предоплата…"
         className="mt-2.5 w-full rounded-lg border border-transparent bg-black/30 px-3 py-1.5 text-[16px] text-white/85 placeholder:text-white/25 focus:border-[var(--border)] focus:outline-none sm:mt-3 sm:py-2 sm:text-[14px]"
       />
-      <div className="mt-1 text-[11px] text-white/30 sm:mt-1.5 sm:text-[12px]">
-        {b.source === 'admin' ? 'Добавил администратор' : 'Заявка с сайта'}:{' '}
-        {new Date(b.created_at).toLocaleString('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}
+      <div className="mt-1 flex items-center gap-3 text-[11px] text-white/30 sm:mt-1.5 sm:text-[12px]">
+        <span className="flex-1">
+          {b.source === 'admin' ? 'Добавил администратор' : 'Заявка с сайта'}:{' '}
+          {new Date(b.created_at).toLocaleString('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}
+        </span>
+        {!editing && (
+          <button onClick={startEdit} className="flex items-center gap-1 text-[13px] text-[var(--muted)] hover:text-white">
+            <Pencil size={13} /> Изменить
+          </button>
+        )}
       </div>
     </article>
   );
@@ -531,31 +789,34 @@ const CELL: Record<string, string> = {
   new: 'border-amber-400/50 bg-amber-400/15 text-amber-100',
   confirmed: 'border-sky-400/50 bg-sky-400/15 text-sky-100',
   done: 'border-emerald-400/50 bg-emerald-400/15 text-emerald-100',
+  no_show: 'border-rose-400/50 bg-rose-400/10 text-rose-200',
 };
 
 // Сетка дня по филиалу: мастера × время. Сразу видно, у кого когда свободно;
 // нажать на свободную ячейку — открыть запись с этим мастером и временем.
-function Schedule({ onAdd }: { onAdd: (init: AddInit) => void }) {
-  const [branch, setBranch] = useState(LOCATIONS[0].name);
+function Schedule({ lock, onAdd }: { lock: string | null; onAdd: (init: AddInit) => void }) {
+  const [branch, setBranch] = useState(lock ?? LOCATIONS[0].name);
   const [date, setDate] = useState(dayOffset(0));
   const [rows, setRows] = useState<Booking[]>([]);
+  const [blocks, setBlocks] = useState<Block[]>([]);
   const [now, setNow] = useState(() => new Date());
   const [open, setOpen] = useState<Booking | null>(null); // карточка занятой ячейки
+  const [blocking, setBlocking] = useState(false); // окно «Закрыть время»
 
   const load = useCallback(async () => {
-    const { data } = await supabase
-      .from('bookings')
-      .select('*')
-      .eq('location', branch)
-      .eq('date', date)
-      .in('status', ['new', 'confirmed', 'done']);
-    setRows((data ?? []) as Booking[]);
+    const [b, s] = await Promise.all([
+      supabase.from('bookings').select('*').eq('location', branch).eq('date', date).in('status', ['new', 'confirmed', 'done', 'no_show']),
+      supabase.from('schedule_blocks').select('*').eq('location', branch).eq('date', date),
+    ]);
+    setRows((b.data ?? []) as Booking[]);
+    setBlocks((s.data ?? []) as Block[]);
   }, [branch, date]);
 
   useEffect(() => {
     load();
   }, [load]);
   useLiveReload('schedule', load);
+  useLiveReload('schedule-blocks', load, 'schedule_blocks');
 
   // прошедшее время гаснет само
   useEffect(() => {
@@ -567,15 +828,46 @@ function Schedule({ onAdd }: { onAdd: (init: AddInit) => void }) {
   // «Любой мастер» — заявки без мастера: показываем отдельной колонкой, чтобы их распределили
   const cols = [...masters, ...(rows.some((r) => r.barber === 'Любой') ? ['Любой'] : [])];
   const at = (m: string, t: string) => rows.filter((r) => r.barber === m && r.time === t);
+  // запись, которая занимает этот слот: начинается здесь или идёт с предыдущих слотов (длинная услуга)
+  const coverAt = (m: string, t: string) =>
+    rows.find((r) => {
+      const from = TIME_SLOTS.indexOf(r.time);
+      const i = TIME_SLOTS.indexOf(t);
+      return r.barber === m && i >= from && i < from + Math.ceil(r.duration / 30);
+    });
+  // закрыт ли слот: весь день или этот перерыв
+  const blockAt = (m: string, t: string) => blocks.find((x) => x.barber === m && (x.time === null || x.time === t));
+  const dayOff = (m: string) => blocks.find((x) => x.barber === m && x.time === null);
   const isPast = (t: string) => {
     if (date < dayOffset(0)) return true;
     if (date > dayOffset(0)) return false;
     const [h, mm] = t.split(':').map(Number);
-    return h * 60 + mm <= now.getHours() * 60 + now.getMinutes();
+    return h * 60 + mm < now.getHours() * 60 + now.getMinutes();
   };
-  const freeCount = (m: string) => TIME_SLOTS.filter((t) => !isPast(t) && at(m, t).length === 0).length;
-  // прошедшее время без записей не показываем — оно только занимает место
-  const slots = TIME_SLOTS.filter((t) => !isPast(t) || cols.some((m) => at(m, t).length));
+  // Красная линия «сейчас»: ставится на начало ближайшего предстоящего получаса.
+  // Так барберы без часов видят, что уже прошло, а что ещё впереди.
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const showNow = date === dayOffset(0);
+  const nowIdx = TIME_SLOTS.findIndex((t) => toMin(t) >= nowMin);
+  const nowAt = nowIdx === -1 ? TIME_SLOTS.length : nowIdx;
+  const nowLine = (
+    <tr>
+      <td colSpan={cols.length + 1} className="p-0">
+        <div className="relative h-0.5 bg-red-500">
+          <span className="absolute -top-2.5 left-0 rounded bg-red-500 px-1.5 text-[10px] text-white">сейчас {fromMin(nowMin)}</span>
+        </div>
+      </td>
+    </tr>
+  );
+  const freeCount = (m: string) => TIME_SLOTS.filter((t) => !isPast(t) && !coverAt(m, t) && !blockAt(m, t)).length;
+  // весь день показываем всегда: и утренних клиентов, и тех, у кого уже прошло время
+  const slots = TIME_SLOTS;
+  const deleteBlock = async (id: string) => {
+    if (!confirm('Снять закрытие? Время снова станет доступно для записи.')) return;
+    const { error } = await supabase.from('schedule_blocks').delete().eq('id', id);
+    if (error) return alert('Не получилось снять. Попробуйте ещё раз.');
+    load();
+  };
   const shift = (n: number) => {
     const d = new Date(`${date}T00:00:00`);
     d.setDate(d.getDate() + n);
@@ -585,13 +877,15 @@ function Schedule({ onAdd }: { onAdd: (init: AddInit) => void }) {
 
   return (
     <div>
-      <div className="flex gap-2 sm:flex-wrap">
-        {LOCATIONS.map((l) => (
-          <button key={l.name} onClick={() => setBranch(l.name)} className={chip(branch === l.name)}>
-            {l.name}
-          </button>
-        ))}
-      </div>
+      {!lock && (
+        <div className="flex gap-2 sm:flex-wrap">
+          {LOCATIONS.map((l) => (
+            <button key={l.name} onClick={() => setBranch(l.name)} className={chip(branch === l.name)}>
+              {l.name}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <button onClick={() => shift(-1)} aria-label="Предыдущий день" className={arrow}>
@@ -621,6 +915,28 @@ function Schedule({ onAdd }: { onAdd: (init: AddInit) => void }) {
         <span className="flex items-center gap-1.5"><i className={`h-3 w-3 rounded border ${CELL.new}`} /> новая с сайта</span>
         <span className="flex items-center gap-1.5"><i className={`h-3 w-3 rounded border ${CELL.confirmed}`} /> записан</span>
         <span className="flex items-center gap-1.5"><i className={`h-3 w-3 rounded border ${CELL.done}`} /> пришёл</span>
+        <span className="flex items-center gap-1.5"><i className={`h-3 w-3 rounded border ${CELL.no_show}`} /> не пришёл</span>
+        <span className="flex items-center gap-1.5"><i className="h-3 w-3 rounded border border-white/10 bg-white/5" /> закрыто (выходной, перерыв)</span>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button onClick={() => setBlocking(true)} className="flex items-center gap-1.5 rounded-xl border border-[var(--border)] px-3 py-2 text-[14px] text-[var(--muted)] hover:text-white">
+          <Ban size={14} /> Закрыть день или время
+        </button>
+        {blocks.length > 0 && (
+          <span className="text-[13px] text-[var(--muted)]">
+            Закрыто:{' '}
+            {blocks.map((x) => (
+              <span key={x.id} className="mr-2 inline-flex items-center gap-1 rounded-lg border border-[var(--border)] px-2 py-0.5 text-white/80">
+                {x.barber} · {x.time ?? 'весь день'}
+                {x.reason && <> · {x.reason}</>}
+                <button onClick={() => deleteBlock(x.id)} aria-label="Снять закрытие" className="text-[var(--muted)] hover:text-rose-300">
+                  <Trash2 size={12} />
+                </button>
+              </span>
+            ))}
+          </span>
+        )}
       </div>
 
       {/* Широкая сетка листается вбок, колонка со временем стоит на месте */}
@@ -639,8 +955,8 @@ function Schedule({ onAdd }: { onAdd: (init: AddInit) => void }) {
                     )}
                     <span className="text-[13px] text-white sm:text-[14px]">{m}</span>
                     {m !== 'Любой' && (
-                      <span className={`text-[11px] sm:text-[12px] ${freeCount(m) ? 'text-emerald-300' : 'text-rose-300'}`}>
-                        {freeCount(m) ? `свободно ${freeCount(m)}` : 'всё занято'}
+                      <span className={`text-[11px] sm:text-[12px] ${dayOff(m) ? 'text-white/40' : freeCount(m) ? 'text-emerald-300' : 'text-rose-300'}`}>
+                        {dayOff(m) ? 'выходной' : freeCount(m) ? `свободно ${freeCount(m)}` : 'всё занято'}
                       </span>
                     )}
                   </div>
@@ -649,12 +965,23 @@ function Schedule({ onAdd }: { onAdd: (init: AddInit) => void }) {
             </tr>
           </thead>
           <tbody>
-            {slots.map((t) => {
+            {slots.map((t, i) => {
               const past = isPast(t);
               return (
-                <tr key={t}>
+                <Fragment key={t}>
+                {showNow && i === nowAt && nowLine}
+                <tr>
                   <th className={`sticky left-0 z-10 bg-[#0b0806] pr-1.5 text-right font-display text-[13px] font-normal sm:pr-2 sm:text-[15px] ${past ? 'text-white/25' : 'text-white/80'}`}>{t}</th>
                   {cols.map((m) => {
+                    const cov = coverAt(m, t);
+                    // продолжение длинной услуги: слот занят, но имя пишем только в первой ячейке
+                    if (cov && cov.time !== t) {
+                      return (
+                        <td key={m} className="h-9 p-0 sm:h-11">
+                          <div className={`flex h-full w-full items-center justify-center rounded-lg border text-[11px] opacity-60 ${CELL[cov.status]}`}>↓</div>
+                        </td>
+                      );
+                    }
                     const list = at(m, t);
                     if (list.length) {
                       const b = list[0];
@@ -666,7 +993,22 @@ function Schedule({ onAdd }: { onAdd: (init: AddInit) => void }) {
                             className={`h-full w-full rounded-lg border px-1.5 text-left sm:px-2 ${CELL[b.status]} ${past ? 'opacity-50' : ''}`}
                           >
                             <div className="max-w-[72px] truncate sm:max-w-[110px]">{b.name}</div>
+                            <div className="max-w-[72px] truncate text-[11px] opacity-80 sm:max-w-[110px]">{b.phone || 'без телефона'}</div>
                             {list.length > 1 && <div className="text-[11px] opacity-70">+ ещё {list.length - 1}</div>}
+                          </button>
+                        </td>
+                      );
+                    }
+                    const block = blockAt(m, t);
+                    if (block) {
+                      return (
+                        <td key={m} className="h-9 p-0 sm:h-11">
+                          <button
+                            onClick={() => setBlocking(true)}
+                            title={`Закрыто${block.reason ? `: ${block.reason}` : ''}`}
+                            className="flex h-full w-full items-center justify-center gap-1 rounded-lg border border-white/10 bg-[repeating-linear-gradient(135deg,rgba(255,255,255,0.04)_0_6px,transparent_6px_12px)] px-1 text-[11px] text-white/40"
+                          >
+                            <Ban size={11} /> {block.reason || (block.time === null ? 'выходной' : 'перерыв')}
                           </button>
                         </td>
                       );
@@ -685,12 +1027,27 @@ function Schedule({ onAdd }: { onAdd: (init: AddInit) => void }) {
                     );
                   })}
                 </tr>
+                </Fragment>
               );
             })}
+            {showNow && nowAt === TIME_SLOTS.length && nowLine}
           </tbody>
         </table>
         {slots.length === 0 && <p className="mt-4 text-center text-[var(--muted)]">В этот день записей не было</p>}
       </div>
+
+      {blocking && (
+        <BlockModal
+          branch={branch}
+          masters={masters}
+          date={date}
+          onClose={() => setBlocking(false)}
+          onSaved={() => {
+            setBlocking(false);
+            load();
+          }}
+        />
+      )}
 
       {/* Карточка клиента прямо из расписания: позвонить, отметить «Пришёл» / «Не пришёл» */}
       {open && (
@@ -714,16 +1071,148 @@ function Schedule({ onAdd }: { onAdd: (init: AddInit) => void }) {
   );
 }
 
+// Выходной или перерыв мастера. Сайт и CRM не дают записаться в закрытое время.
+function BlockModal({
+  branch,
+  masters,
+  date,
+  onClose,
+  onSaved,
+}: {
+  branch: string;
+  masters: string[];
+  date: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [barber, setBarber] = useState(masters[0] ?? '');
+  const [mode, setMode] = useState<'day' | 'times'>('day');
+  const [day, setDay] = useState(date);
+  const [times, setTimes] = useState<string[]>([]);
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const ready = barber && day && (mode === 'day' || times.length > 0);
+  const save = async () => {
+    if (!ready) return;
+    setSaving(true);
+    setError('');
+    const rows = mode === 'day' ? [null] : times;
+    const { error } = await supabase.from('schedule_blocks').insert(
+      rows.map((t) => ({ location: branch, barber, date: day, time: t, reason: reason.trim() }))
+    );
+    setSaving(false);
+    if (!error) return onSaved();
+    setError(error.code === '23505' ? 'Это время уже закрыто.' : 'Не сохранилось. Проверьте интернет и попробуйте ещё раз.');
+  };
+
+  const chip2 = (active: boolean) =>
+    `rounded-lg border px-3 py-2 text-[14px] ${active ? 'border-[var(--gold)] bg-[var(--gold)]/10 text-white' : 'border-[var(--border)] text-[var(--muted)]'}`;
+  const label = 'block text-[11px] tracking-[0.1em] uppercase text-[var(--muted)] sm:text-[12px]';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/80 p-2 sm:items-center sm:p-4">
+      <div className="w-full max-w-lg rounded-2xl border border-[var(--border)] bg-[#0e0e0e] p-4 sm:p-6">
+        <div className="flex items-center justify-between">
+          <h2 className="font-display text-[20px] tracking-[0.06em] uppercase">Закрыть время</h2>
+          <button onClick={onClose} aria-label="Закрыть" className="text-[var(--muted)] hover:text-white">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="mt-4 grid gap-4">
+          <div>
+            <span className={label}>Мастер</span>
+            <div className="mt-1.5 flex flex-wrap gap-2">
+              {masters.map((m) => (
+                <button key={m} onClick={() => setBarber(m)} className={chip2(barber === m)}>
+                  {m}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <span className={label}>Что закрыть</span>
+            <div className="mt-1.5 flex flex-wrap gap-2">
+              <button onClick={() => setMode('day')} className={chip2(mode === 'day')}>
+                Весь день (выходной)
+              </button>
+              <button onClick={() => setMode('times')} className={chip2(mode === 'times')}>
+                Несколько часов (перерыв)
+              </button>
+            </div>
+          </div>
+
+          <label className={label}>
+            День
+            <input
+              type="date"
+              value={day}
+              onChange={(e) => setDay(e.target.value)}
+              className="mt-1.5 w-full rounded-xl border border-[var(--border)] bg-black/40 px-3 py-2 text-[16px] focus:border-[var(--gold)] focus:outline-none sm:text-[15px]"
+            />
+          </label>
+
+          {mode === 'times' && (
+            <div>
+              <span className={label}>Время — можно выбрать несколько</span>
+              <div className="mt-1.5 grid grid-cols-5 gap-1.5">
+                {TIME_SLOTS.map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setTimes(times.includes(s) ? times.filter((x) => x !== s) : [...times, s])}
+                    className={`rounded-lg border py-1.5 text-[13px] sm:py-2 ${times.includes(s) ? 'border-[var(--gold)] bg-[var(--gold)]/10 text-white' : 'border-[var(--border)] text-[var(--muted)]'}`}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <label className={label}>
+            Причина (необязательно)
+            <input
+              value={reason}
+              maxLength={60}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="обед, отпуск, выходной"
+              className="mt-1.5 w-full rounded-xl border border-[var(--border)] bg-black/40 px-3 py-2 text-[16px] focus:border-[var(--gold)] focus:outline-none sm:text-[15px]"
+            />
+          </label>
+        </div>
+
+        {error && <p className="mt-4 text-[14px] text-rose-400">{error}</p>}
+
+        <div className="mt-5 flex gap-2">
+          <button onClick={save} disabled={!ready || saving} className={`btn ${ready && !saving ? 'btn-gold' : 'btn-ghost opacity-40'}`}>
+            {saving ? 'Сохраняем…' : 'Закрыть'}
+          </button>
+          <button onClick={onClose} className="btn btn-ghost">
+            Отмена
+          </button>
+        </div>
+        <p className="mt-3 text-[12px] text-[var(--muted)]">Снять закрытие можно в расписании, кнопкой корзины у строки «Закрыто».</p>
+      </div>
+    </div>
+  );
+}
+
 // Запись по телефону или клиент пришёл без записи. Время этой записи сразу
 // становится занятым и на сайте.
-function AddBooking({ init, onClose, onSaved }: { init: AddInit; onClose: () => void; onSaved: () => void }) {
+function AddBooking({ init, lock, onClose, onSaved }: { init: AddInit; lock: string | null; onClose: () => void; onSaved: () => void }) {
   const [branch, setBranch] = useState(init.branch ?? '');
   const [barber, setBarber] = useState(init.barber ?? '');
   const [date, setDate] = useState(init.date ?? dayOffset(0));
-  const [time, setTime] = useState(init.time ?? '');
+  const [times, setTimes] = useState<string[]>(init.time ? [init.time] : []); // можно несколько времён
+  const [extra, setExtra] = useState<string[]>([]); // другие дни: то же время и тот же мастер
   const pickedFor = useRef(`${branch}|${barber}|${date}`);
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
+  const [service, setService] = useState('');
+  const [price, setPrice] = useState('');
   const [note, setNote] = useState('');
   const [walkIn, setWalkIn] = useState(false);
   const [busy, setBusy] = useState<string[]>([]);
@@ -731,40 +1220,59 @@ function AddBooking({ init, onClose, onSaved }: { init: AddInit; onClose: () => 
   const [error, setError] = useState('');
 
   const masters = LOCATIONS.find((l) => l.name === branch)?.masters ?? [];
+  // длительность от услуги: запись занимает все свои получасовые слоты
+  const minutes = BOOKING_SERVICES.find((s) => s.name === service)?.minutes ?? 30;
+  // все выбранные дни без повторов; запись создаётся на каждое выбранное время в каждый из этих дней
+  const dates = [...new Set([date, ...extra].filter(Boolean))];
+  const datesKey = dates.join();
 
   useEffect(() => {
-    // сменили филиал, мастера или дату — выбранное время больше не актуально
+    // сменили филиал, мастера или основную дату — выбранное время больше не актуально
     const key = `${branch}|${barber}|${date}`;
     if (pickedFor.current !== key) {
       pickedFor.current = key;
-      setTime('');
+      setTimes([]);
     }
     if (!branch || !barber || barber === 'Любой' || !date) return setBusy([]);
-    supabase.rpc('busy_slots', { p_location: branch, p_date: date }).then(({ data }) => {
-      setBusy(((data ?? []) as { barber: string; time: string }[]).filter((r) => r.barber === barber).map((r) => r.time));
+    // занятое время показываем, если оно занято хотя бы в один из выбранных дней
+    Promise.all(dates.map((d) => supabase.rpc('busy_slots', { p_location: branch, p_date: d }))).then((res) => {
+      const taken = res.flatMap((r) => ((r.data ?? []) as { barber: string; time: string }[]).filter((x) => x.barber === barber).map((x) => x.time));
+      setBusy(taken);
+      setTimes((t) => t.filter((x) => !taken.includes(x)));
     });
-  }, [branch, barber, date]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [branch, barber, datesKey]);
 
-  const ready = branch && barber && date && time && name.trim();
+  const ready = branch && barber && dates.length && times.length && name.trim();
+  const count = dates.length * times.length;
 
   const save = async () => {
     if (!ready) return;
+    if (count > 40) return setError('Слишком много записей за раз — не больше 40.');
     setSaving(true);
     setError('');
-    const { error } = await supabase.from('bookings').insert({
-      location: branch,
-      barber,
-      date,
-      time,
-      name: name.trim(),
-      phone: phone.trim(),
-      note: note.trim(),
-      source: 'admin',
-      status: walkIn ? 'done' : 'confirmed',
-    });
+    // одним запросом: либо создаются все записи, либо ни одной
+    const { error } = await supabase.from('bookings').insert(
+      dates.flatMap((d) =>
+        times.map((t) => ({
+          location: branch,
+          barber,
+          date: d,
+          time: t,
+          name: name.trim(),
+          phone: phone.trim(),
+          service: service.trim(),
+          price: price.trim() === '' ? null : Number(price),
+          duration: minutes,
+          note: note.trim(),
+          source: 'admin',
+          status: walkIn && dates.length === 1 ? 'done' : 'confirmed',
+        }))
+      )
+    );
     setSaving(false);
     if (!error) return onSaved();
-    setError(error.code === '23505' ? 'Это время у мастера уже занято — выберите другое.' : 'Не сохранилось. Проверьте интернет и попробуйте ещё раз.');
+    setError(error.code === '23505' ? 'Одно из выбранных времён у мастера уже занято. Ничего не сохранено — обновите и выберите другое.' : 'Не сохранилось. Проверьте интернет и попробуйте ещё раз.');
   };
 
   // 16px на телефоне — иначе iPhone приближает страницу при вводе
@@ -785,7 +1293,7 @@ function AddBooking({ init, onClose, onSaved }: { init: AddInit; onClose: () => 
           <div>
             <span className={label}>Филиал</span>
             <div className="mt-1.5 flex flex-wrap gap-2">
-              {LOCATIONS.map((l) => (
+              {LOCATIONS.filter((l) => !lock || l.name === lock).map((l) => (
                 <button
                   key={l.name}
                   onClick={() => {
@@ -818,19 +1326,23 @@ function AddBooking({ init, onClose, onSaved }: { init: AddInit; onClose: () => 
           </div>
 
           <div>
-            <span className={label}>Время</span>
+            <span className={label}>Время — можно выбрать несколько · услуга займёт {minutes} мин</span>
             <div className="mt-1.5 grid grid-cols-5 gap-1.5">
               {TIME_SLOTS.map((s) => {
-                const taken = busy.includes(s);
+                const on = times.includes(s);
+                // занято или не помещается целиком (в том числе пересекается с уже выбранным временем)
+                const taken =
+                  !fitsAt(s, minutes, (x) => !busy.includes(x)) ||
+                  times.some((x) => x !== s && coveredSlots(x, minutes).some((y) => coveredSlots(s, minutes).includes(y)));
                 return (
                   <button
                     key={s}
-                    disabled={taken}
-                    onClick={() => setTime(s)}
+                    disabled={taken && !on}
+                    onClick={() => setTimes(on ? times.filter((x) => x !== s) : [...times, s])}
                     className={`rounded-lg border py-1.5 text-[13px] sm:py-2 ${
                       taken
                         ? 'cursor-not-allowed border-transparent text-white/20 line-through'
-                        : time === s
+                        : on
                           ? 'border-[var(--gold)] bg-[var(--gold)]/10'
                           : 'border-[var(--border)] text-[var(--muted)]'
                     }`}
@@ -839,6 +1351,31 @@ function AddBooking({ init, onClose, onSaved }: { init: AddInit; onClose: () => 
                   </button>
                 );
               })}
+            </div>
+          </div>
+
+          <div>
+            <span className={label}>Другие дни — то же время и тот же мастер</span>
+            <div className="mt-1.5 flex flex-wrap items-center gap-2">
+              {extra.map((d, i) => (
+                <span key={i} className="flex items-center gap-1 rounded-xl border border-[var(--border)] bg-black/40 pr-2">
+                  <input
+                    type="date"
+                    value={d}
+                    onChange={(e) => setExtra(extra.map((x, j) => (j === i ? e.target.value : x)))}
+                    className="bg-transparent px-3 py-1.5 text-[16px] focus:outline-none sm:text-[14px]"
+                  />
+                  <button onClick={() => setExtra(extra.filter((_, j) => j !== i))} aria-label="Убрать день" className="text-[var(--muted)] hover:text-white">
+                    <X size={16} />
+                  </button>
+                </span>
+              ))}
+              <button
+                onClick={() => setExtra([...extra, ''])}
+                className="flex items-center gap-1 rounded-xl border border-dashed border-white/20 px-3 py-1.5 text-[14px] text-[var(--muted)] hover:text-white"
+              >
+                <Plus size={14} /> Добавить день
+              </button>
             </div>
           </div>
 
@@ -853,22 +1390,52 @@ function AddBooking({ init, onClose, onSaved }: { init: AddInit; onClose: () => 
             </label>
           </div>
 
+          <div className="grid grid-cols-2 items-end gap-3">
+            <label className={label}>
+              Услуга
+              <select
+                value={service}
+                onChange={(e) => {
+                  const s = BOOKING_SERVICES.find((x) => x.name === e.target.value);
+                  setService(e.target.value);
+                  setPrice(s ? String(s.price) : '');
+                  setTimes([]);
+                }}
+                className={field}
+              >
+                <option value="">—</option>
+                {BOOKING_SERVICES.map((s) => (
+                  <option key={s.name} value={s.name}>
+                    {s.name} · {s.minutes} мин
+                  </option>
+                ))}
+                <option value="Другая">Другая · 30 мин</option>
+              </select>
+            </label>
+            <label className={label}>
+              Стоимость, ₸
+              <input inputMode="numeric" value={price} onChange={(e) => setPrice(e.target.value.replace(/\D/g, ''))} placeholder="5000" className={field} />
+            </label>
+          </div>
+
           <label className={label}>
             Заметка
             <input value={note} onChange={(e) => setNote(e.target.value)} className={field} />
           </label>
 
-          <label className="flex items-center gap-2.5 text-[14px]">
-            <input type="checkbox" checked={walkIn} onChange={(e) => setWalkIn(e.target.checked)} className="h-4 w-4 accent-[#d4af37]" />
-            Клиент уже здесь (пришёл без записи) — сразу отметить «Пришёл»
-          </label>
+          {dates.length === 1 && (
+            <label className="flex items-center gap-2.5 text-[14px]">
+              <input type="checkbox" checked={walkIn} onChange={(e) => setWalkIn(e.target.checked)} className="h-4 w-4 accent-[#d4af37]" />
+              Клиент уже здесь (пришёл без записи) — сразу отметить «Пришёл»
+            </label>
+          )}
         </div>
 
         {error && <p className="mt-4 text-[14px] text-rose-400">{error}</p>}
 
         <div className="mt-4 flex gap-2 sm:mt-5">
           <button onClick={save} disabled={!ready || saving} className={`btn ${ready && !saving ? 'btn-gold' : 'btn-ghost opacity-40'}`}>
-            {saving ? 'Сохраняем…' : 'Сохранить'}
+            {saving ? 'Сохраняем…' : count > 1 ? `Сохранить (${count})` : 'Сохранить'}
           </button>
           <button onClick={onClose} className="btn btn-ghost">
             Отмена
@@ -883,8 +1450,12 @@ interface StatRow {
   location: string;
   barber: string;
   status: Status;
+  payment: Payment | null;
   n: number;
+  amount: number;
 }
+
+type Agg = { total: number; done: number; noShow: number; cancelled: number; amount: number; net: number };
 
 // 2026-10-05 → 05.10.2026
 const ru = (s: string) => s.split('-').reverse().join('.');
@@ -892,14 +1463,52 @@ const ru = (s: string) => s.split('-').reverse().join('.');
 function Stats() {
   const [from, setFrom] = useState(dayOffset(-29));
   const [to, setTo] = useState(dayOffset(0));
-  const [rows, setRows] = useState<StatRow[]>([]);
+  const [allRows, setRows] = useState<StatRow[]>([]);
+  const [fBranch, setFBranch] = useState('all'); // фильтр филиала
+  const [fMaster, setFMaster] = useState(''); // фильтр мастера, '' — все
+  const [fPay, setFPay] = useState<Payment | ''>(''); // фильтр способа оплаты, '' — все
+  const [rates, setRates] = useState<Record<string, number>>({}); // комиссии: 0.0095 = 0,95%
+  const [pct, setPct] = useState<Record<string, string>>({}); // то, что набрано в полях комиссий
 
   useEffect(() => {
     if (!from || !to) return;
     supabase
       .rpc('crm_stats', { p_from: from, p_to: to })
-      .then(({ data }) => setRows(((data ?? []) as StatRow[]).map((r) => ({ ...r, n: Number(r.n) }))));
+      .then(({ data }) => setRows(((data ?? []) as StatRow[]).map((r) => ({ ...r, n: Number(r.n), amount: Number(r.amount) }))));
   }, [from, to]);
+
+  useEffect(() => {
+    supabase
+      .from('payment_rates')
+      .select('method, rate')
+      .then(({ data }) => {
+        const r: Record<string, number> = {};
+        const p: Record<string, string> = {};
+        for (const x of (data ?? []) as { method: string; rate: number | string }[]) {
+          r[x.method] = Number(x.rate);
+          p[x.method] = String(+(Number(x.rate) * 100).toFixed(2));
+        }
+        setRates(r);
+        setPct(p);
+      });
+  }, []);
+
+  const saveRate = async (method: string) => {
+    const r = Number((pct[method] ?? '').replace(',', '.')) / 100;
+    if (!(r >= 0 && r < 0.5)) return alert('Комиссия — число от 0 до 50, например 0,95');
+    const { error } = await supabase.from('payment_rates').update({ rate: r }).eq('method', method);
+    if (error) return alert('Не сохранилось, попробуйте ещё раз');
+    setRates((x) => ({ ...x, [method]: r }));
+  };
+
+  // Отчёт по выбранному филиалу, мастеру и способу оплаты; таблицы тоже учитывают фильтры
+  const rows = allRows.filter(
+    (r) => (fBranch === 'all' || r.location === fBranch) && (!fMaster || r.barber === fMaster) && (!fPay || r.payment === fPay)
+  );
+  const rateOf = (p: Payment | null) => (p ? rates[p] ?? 0 : 0);
+  // сумма на руки: из стоимости вычитается комиссия банка способа оплаты
+  const netOf = (r: StatRow) => Math.round(r.amount * (1 - rateOf(r.payment)));
+  const masterList = [...new Set(allRows.filter((r) => fBranch === 'all' || r.location === fBranch).map((r) => r.barber))].sort();
 
   const sum = (f: (r: StatRow) => boolean) => rows.filter(f).reduce((a, r) => a + r.n, 0);
   const total = sum(() => true);
@@ -909,15 +1518,22 @@ function Stats() {
   const waiting = sum((r) => r.status === 'new' || r.status === 'confirmed');
   const noShowRate = done + noShow ? Math.round((noShow / (done + noShow)) * 100) : 0;
 
-  const by = (key: 'location' | 'barber') => {
-    const m = new Map<string, { total: number; done: number; noShow: number; cancelled: number }>();
+  const amountSum = rows.reduce((a, r) => a + r.amount, 0);
+  const netSum = rows.reduce((a, r) => a + netOf(r), 0);
+  const feeSum = amountSum - netSum;
+
+  const by = (key: 'location' | 'barber' | 'payment') => {
+    const m = new Map<string, Agg>();
     for (const r of rows) {
-      const v = m.get(r[key]) ?? { total: 0, done: 0, noShow: 0, cancelled: 0 };
+      const k = r[key] ?? 'none';
+      const v = m.get(k) ?? { total: 0, done: 0, noShow: 0, cancelled: 0, amount: 0, net: 0 };
       v.total += r.n;
+      v.amount += r.amount;
+      v.net += netOf(r);
       if (r.status === 'done') v.done += r.n;
       if (r.status === 'no_show') v.noShow += r.n;
       if (r.status === 'cancelled') v.cancelled += r.n;
-      m.set(r[key], v);
+      m.set(k, v);
     }
     return [...m.entries()].sort((a, b) => b[1].total - a[1].total);
   };
@@ -925,8 +1541,8 @@ function Stats() {
   // CSV с «;» и BOM — так его правильно открывает русский Excel
   const download = () => {
     const table = (title: string, items: ReturnType<typeof by>) => [
-      [title, 'Всего', 'Пришли', 'Не пришли', 'Отменены'],
-      ...items.map(([n, v]) => [n, v.total, v.done, v.noShow, v.cancelled]),
+      [title, 'Всего', 'Пришли', 'Не пришли', 'Отменены', 'Сумма, ₸', 'На руки, ₸'],
+      ...items.map(([n, v]) => [n === 'none' ? 'не указана' : n, v.total, v.done, v.noShow, v.cancelled, v.amount, v.net]),
       [],
     ];
     const lines: (string | number)[][] = [
@@ -938,9 +1554,13 @@ function Stats() {
       ['Не пришли, %', noShowRate],
       ['Отменены', cancelled],
       ['Ждут визита', waiting],
+      ['Сумма за услуги, ₸', amountSum],
+      ['Комиссия банков, ₸', feeSum],
+      ['На руки, ₸', netSum],
       [],
       ...table('Филиал', by('location')),
       ...table('Мастер', by('barber')),
+      ...table('Оплата', by('payment')),
     ];
     const csv = '﻿' + lines.map((l) => l.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(';')).join('\r\n');
     const a = document.createElement('a');
@@ -993,7 +1613,34 @@ function Stats() {
           <Download size={16} /> Скачать (Excel)
         </button>
       </div>
-      <p className="mt-2 text-[13px] text-[var(--muted)]">Считаются записи на даты с {ru(from)} по {ru(to)} включительно.</p>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {['all', ...LOCATIONS.map((l) => l.name)].map((b) => (
+          <button
+            key={b}
+            onClick={() => {
+              setFBranch(b);
+              setFMaster('');
+            }}
+            className={chip(fBranch === b)}
+          >
+            {b === 'all' ? 'Все филиалы' : b}
+          </button>
+        ))}
+        <select value={fMaster} onChange={(e) => setFMaster(e.target.value)} aria-label="Мастер" className="rounded-xl border border-[var(--border)] bg-black/40 px-3 py-2 text-[16px] sm:text-[14px]">
+          <option value="">Все мастера</option>
+          {masterList.map((m) => (
+            <option key={m}>{m}</option>
+          ))}
+        </select>
+      </div>
+      <div className="no-sb -mx-4 mt-2 flex gap-2 overflow-x-auto px-4 sm:flex-wrap">
+        {(['', ...PAYMENTS.map((p) => p.id)] as const).map((p) => (
+          <button key={p || 'all'} onClick={() => setFPay(p)} className={chip(fPay === p)}>
+            {p ? PAYMENTS.find((x) => x.id === p)?.label : 'Любая оплата'}
+          </button>
+        ))}
+      </div>
+      <p className="mt-2 text-[13px] text-[var(--muted)]">Считаются записи на даты с {ru(from)} по {ru(to)} включительно. Сумма — только по записям «Пришёл» с указанной стоимостью.</p>
 
       <div className="mt-4 grid grid-cols-2 gap-2 sm:mt-5 sm:gap-3 md:grid-cols-5">
         {(
@@ -1003,6 +1650,9 @@ function Stats() {
             ['Не пришли', `${noShow} · ${noShowRate}%`, 'text-rose-300'],
             ['Отменены', cancelled, 'text-white/60'],
             ['Ждут визита', waiting, 'text-amber-300'],
+            ['Сумма за услуги', money(amountSum), 'text-[var(--gold-soft)]'],
+            ['Комиссия банков', money(feeSum), 'text-white/60'],
+            ['На руки', money(netSum), 'text-emerald-300'],
           ] as const
         ).map(([label, value, cls]) => (
           <div key={label} className="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-3 sm:p-4">
@@ -1015,12 +1665,38 @@ function Stats() {
       <div className="mt-4 grid gap-3 sm:mt-6 sm:gap-4 md:grid-cols-2">
         <StatTable title="По филиалам" items={by('location')} />
         <StatTable title="По мастерам" items={by('barber')} />
+        <StatTable title="По способу оплаты" items={by('payment')} />
+
+        {/* Комиссии банков: меняются здесь, и пересчитывается сумма на руки */}
+        <div className="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 sm:p-5">
+          <h3 className="mb-3 text-[12px] tracking-[0.16em] uppercase text-[var(--gold)]">Комиссии банков, %</h3>
+          <div className="flex flex-col gap-2">
+            {PAYMENTS.filter((p) => p.id !== 'cash').map((p) => (
+              <div key={p.id} className="flex items-center gap-2 text-[14px]">
+                <span className="flex-1">{p.label}</span>
+                <input
+                  inputMode="decimal"
+                  value={pct[p.id] ?? ''}
+                  onChange={(e) => setPct({ ...pct, [p.id]: e.target.value })}
+                  aria-label={`Комиссия ${p.label}`}
+                  className="w-24 rounded-lg border border-[var(--border)] bg-black/40 px-3 py-1.5 text-right text-[16px] sm:text-[14px]"
+                />
+                <span className="text-[var(--muted)]">%</span>
+                <button onClick={() => saveRate(p.id)} className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-[13px] text-[var(--muted)] hover:text-white">
+                  Сохранить
+                </button>
+              </div>
+            ))}
+          </div>
+          <p className="mt-3 text-[12px] text-[var(--muted)]">Наличка без комиссии. Новая ставка действует на отчёты с этого момента, прошлые суммы пересчитываются по ней же.</p>
+        </div>
       </div>
     </div>
   );
 }
 
-function StatTable({ title, items }: { title: string; items: [string, { total: number; done: number; noShow: number }][] }) {
+function StatTable({ title, items }: { title: string; items: [string, Agg][] }) {
+  const label = (k: string) => (k === 'none' ? 'не указана' : (PAYMENTS.find((p) => p.id === k)?.label ?? k));
   const max = Math.max(1, ...items.map(([, v]) => v.total));
   return (
     <div className="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 sm:p-5">
@@ -1034,6 +1710,8 @@ function StatTable({ title, items }: { title: string; items: [string, { total: n
               <span className="text-[var(--muted)]">
                 {v.total} · <span className="text-emerald-300">{v.done} пришли</span>
                 {v.noShow > 0 && <span className="text-rose-300"> · {v.noShow} нет</span>}
+                {v.amount > 0 && <span className="text-[var(--gold-soft)]"> · {money(v.amount)}</span>}
+                {v.amount > 0 && <span className="text-emerald-300"> · на руки {money(v.net)}</span>}
               </span>
             </div>
             <div className="mt-1 h-1.5 rounded-full bg-white/5">
@@ -1046,23 +1724,26 @@ function StatTable({ title, items }: { title: string; items: [string, { total: n
   );
 }
 
-// Только для Касыма: новый пароль общего входа сотрудников и смена своего пароля.
+// Только для Касыма: пароль администратора каждого филиала и смена своего пароля.
 function Passwords() {
-  const [staffPass, setStaffPass] = useState('');
-  const [staffMsg, setStaffMsg] = useState('');
+  const [pass, setPass] = useState<Record<string, string>>({});
+  const [msg, setMsg] = useState<Record<string, string>>({});
   const [myPass, setMyPass] = useState('');
   const [myPass2, setMyPass2] = useState('');
   const [myMsg, setMyMsg] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const saveStaff = async () => {
-    if (staffPass.length < 8) return setStaffMsg('Пароль должен быть не короче 8 символов');
-    if (!confirm('Поставить новый пароль? Все сотрудники выйдут из CRM и войдут уже с новым паролем.')) return;
+  const saveBranch = async (name: string) => {
+    const p = pass[name] ?? '';
+    const say = (t: string) => setMsg((m) => ({ ...m, [name]: t }));
+    if (p.length < 8) return say('Пароль должен быть не короче 8 символов');
+    if (!confirm(`Поставить новый пароль администратору «${name}»? Он выйдет из CRM на всех устройствах.`)) return;
     setBusy(true);
-    const { error } = await supabase.rpc('set_staff_password', { p_password: staffPass });
+    const { error } = await supabase.rpc('set_staff_password', { p_email: LOGIN_EMAIL[name], p_password: p });
     setBusy(false);
-    setStaffMsg(error ? 'Не сохранилось. Проверьте интернет и попробуйте ещё раз.' : `Готово. Новый пароль сотрудников: ${staffPass} — передайте его администраторам.`);
-    if (!error) setStaffPass('');
+    if (error) return say(error.message.includes('не создан') ? error.message : 'Не сохранилось. Проверьте интернет и попробуйте ещё раз.');
+    say(`Готово. Новый пароль «${name}»: ${p} — передайте его администратору.`);
+    setPass((s) => ({ ...s, [name]: '' }));
   };
 
   const saveMine = async () => {
@@ -1083,24 +1764,26 @@ function Passwords() {
 
   return (
     <div className="grid max-w-xl gap-4">
-      <section className={box}>
-        <h2 className="font-display text-[18px] tracking-[0.06em] uppercase">Пароль сотрудников</h2>
-        <p className="mt-1.5 text-[14px] leading-relaxed text-[var(--muted)]">
-          Если администратор забыл пароль или от вас ушёл сотрудник — задайте новый. Все устройства сотрудников выйдут из CRM, войти можно
-          будет только с новым паролем.
-        </p>
-        <input
-          value={staffPass}
-          onChange={(e) => setStaffPass(e.target.value)}
-          placeholder="Новый пароль, от 8 символов"
-          autoComplete="off"
-          className={field}
-        />
-        {staffMsg && <p className="mt-2 text-[14px] text-[var(--gold-soft)]">{staffMsg}</p>}
-        <button onClick={saveStaff} disabled={busy} className="btn btn-gold mt-3 !h-10">
-          Сохранить пароль сотрудников
-        </button>
-      </section>
+      <p className="text-[14px] leading-relaxed text-[var(--muted)]">
+        У каждого филиала свой администратор и свой пароль. Забыл пароль или ушёл сотрудник — задайте новый: он выйдет из CRM на всех
+        устройствах и войдёт уже с новым паролем. Остальные филиалы это не затронет.
+      </p>
+      {LOCATIONS.map((l) => (
+        <section key={l.name} className={box}>
+          <h2 className="font-display text-[18px] tracking-[0.06em] uppercase">{l.name}</h2>
+          <input
+            value={pass[l.name] ?? ''}
+            onChange={(e) => setPass((s) => ({ ...s, [l.name]: e.target.value }))}
+            placeholder="Новый пароль, от 8 символов"
+            autoComplete="off"
+            className={field}
+          />
+          {msg[l.name] && <p className="mt-2 text-[14px] text-[var(--gold-soft)]">{msg[l.name]}</p>}
+          <button onClick={() => saveBranch(l.name)} disabled={busy} className="btn btn-gold mt-3 !h-10">
+            Сохранить пароль
+          </button>
+        </section>
+      ))}
 
       <section className={box}>
         <h2 className="font-display text-[18px] tracking-[0.06em] uppercase">Мой пароль</h2>
@@ -1120,13 +1803,18 @@ function Help() {
     ['Расписание', 'Первая вкладка. Выберите филиал и день — видно всех мастеров и всё время: цветные ячейки заняты (нажмите, чтобы открыть клиента), «свободно» — можно записывать. Под каждым мастером написано, сколько у него свободных окошек. Нажмите «свободно» — откроется запись с этим мастером и временем.'],
     ['Новая заявка', 'Клиент записался на сайте — заявка появляется сама, со звуком, и приходит сообщением в Telegram-группу. Подтверждать её не нужно. Если хотите, напомните клиенту о визите кнопками «Телефон» или «WhatsApp» в карточке.'],
     ['Запись по телефону', 'Клиент позвонил или написал — нажмите «Записать», выберите филиал, мастера, дату и время. Это время сразу станет занятым на сайте. Пришёл без записи — поставьте галочку «Клиент уже здесь».'],
+    ['Несколько записей сразу', 'В той же форме можно выбрать несколько времён подряд (например, длинная услуга) и добавить другие дни кнопкой «Добавить день»: запись создастся на каждое время в каждый из дней. Если хоть одно время занято, не сохранится ни одна запись.'],
     ['Отметить визит', 'Клиент пришёл — нажмите «Пришёл». Не пришёл и не предупредил — «Не пришёл». Это можно сделать в «Заявках» или прямо в расписании. Нужно для статистики.'],
     ['Клиент передумал', 'Нажмите «Отменить» — время освободится, на него снова можно записать.'],
     ['Ошиблись кнопкой', 'Нажмите «Вернуть» — запись снова станет ожидающей.'],
     ['Заметки', 'В строке под заявкой можно написать что угодно: пожелания клиента, предоплата и т. п. Сохраняется само, когда вы нажмёте в другое место.'],
-    ['Статистика', 'Выберите период кнопками или поставьте свои даты «с … по …». «Скачать (Excel)» сохраняет цифры файлом.'],
-    ['Поиск', 'Найти клиента по имени или номеру телефона можно в строке поиска на вкладке «Заявки» — ищет по всем датам.'],
-    ['Забыли пароль', 'Новый пароль сотрудников задаёт только Касым: он входит под своим логином и открывает вкладку «Пароли». После смены все сотрудники выходят из CRM и входят с новым паролем.'],
+    ['Статистика', 'Выберите период кнопками или поставьте свои даты «с … по …». Один день — поставьте одинаковые даты. Сумма считается по записям со статусом «Пришёл» и стоимостью, которую вписали в карточке. «Скачать (Excel)» сохраняет цифры файлом.'],
+    ['Услуга и время', 'Услуга задаёт длительность: например, биозавивка — 2 часа, и в расписании закрываются все четыре получасовых слота. Клиент на сайте выбирает услугу сам, а в CRM её выбирает администратор в форме «Записать».'],
+    ['Услуга и стоимость', 'Клиент пришёл — нажмите «Пришёл». Откроется окно: впишите стоимость услуги (и при желании услугу) и нажмите «Завершено». Только после этого запись попадает в статистику. Исправить можно кнопкой «Изменить».'],
+    ['Закрыть день или время', 'В расписании нажмите «Закрыть день или время»: выберите мастера, весь день (выходной) или несколько часов (перерыв). Закрытое время сразу недоступно и на сайте, и в CRM. Снять закрытие можно корзиной у строки «Закрыто».'],
+    ['Поиск', 'Найти клиента по имени или номеру телефона можно в строке поиска на вкладке «Заявки» — ищет по всем датам. Номер можно вводить с плюсом, восьмёркой или по частям. Вверху появится «История клиента»: сколько раз приходил, сумма, последний визит. Ниже — все его записи с заметками.'],
+    ['Вход', 'На экране входа выберите свой филиал и введите пароль. Вы видите только записи своего филиала. Касым («Владелец») видит все.'],
+    ['Забыли пароль', 'Новый пароль администратора филиала задаёт только Касым: он входит как «Владелец» и открывает вкладку «Пароли». После смены администратор выходит из CRM и входит с новым паролем.'],
   ];
   return (
     <div className="max-w-2xl">

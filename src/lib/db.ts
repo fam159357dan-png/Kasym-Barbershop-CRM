@@ -4,6 +4,11 @@
 export const SUPABASE_URL = 'https://dpgvemgpfkzidftaqmqk.supabase.co';
 export const SUPABASE_KEY = 'sb_publishable_Odo1AIZuH7EY-80bg_6w4w_1QZVmxId';
 
+// Связь сайта с CRM. false — сайт не пишет заявки в CRM и не читает занятое время: запись по кнопке
+// «Записаться» сразу открывает WhatsApp филиала. CRM при этом работает сама по себе (тест).
+// Вернуть связь — поставить true.
+export const CRM_LINK = true;
+
 const headers = { apikey: SUPABASE_KEY, 'Content-Type': 'application/json' };
 
 export interface NewBooking {
@@ -13,6 +18,8 @@ export interface NewBooking {
   time: string; // HH:MM
   name: string;
   phone: string;
+  service: string;
+  duration: number; // минуты, 30 / 60 / 120
 }
 
 // Сайт работает без библиотеки Supabase: два простых запроса к REST API.
